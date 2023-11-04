@@ -21,10 +21,27 @@ def report(args):
     report.generate_key_store_report(report_path, keystore)
     print("report generated at: %s" % report_path)
 
-def make_zfs_key(keystore: key_store.FSKeyStore):
+def backup(args):
+    keystore = key_store.FSKeyStore.open(args.keystore)
+    dest_keystore = key_store.FSKeyStore.create_or_open(args.dest)
+
+    copy_pairs = [(key, dest_keystore.get_key_unchecked(key.name)) for key in keystore.all_keys]
+    if not args.force:
+        valid_keys = list(filter(lambda pair: pair[1].is_valid, copy_pairs))
+        if valid_keys:
+            print("not backing up because the following keys already exist in destination")
+            for (src, dst) in valid_keys:
+                print(dst.name)
+            sys.exit(1)
+
+    for (src, dst) in copy_pairs:
+        src.copy(dst)
+    
+
+def make_zfs_key(keystore: key_store.FSKeyStore, dataset: str):
     key_name = uuid.uuid4().hex
     secret = key_store.Secret.generate(len=32)
-    key = keystore.add_key(key_name, secret)
+    key = keystore.add_key(key_name, secret, extra_params={"zfs_dataset": dataset})
     if key is not None:
         return key.abs_path
     else:
@@ -40,16 +57,15 @@ def zfs_rekey(args):
     else:
         keystore = key_store.FSKeyStore.open(args.keystore)
         for dataset in datasets_to_rekey:
-            key_path = make_zfs_key(keystore)
+            key_path = make_zfs_key(keystore, dataset)
             logging.info("rekeying: %s -> %s", dataset, key_path)
             zfs.set_dataset_key(dataset, key_path)
 
 def zfs_create(args):
-    import key_store
     import zfs
 
     keystore = key_store.FSKeyStore.create_or_open(args.keystore)
-    key_path = make_zfs_key(keystore)
+    key_path = make_zfs_key(keystore, args.dataset)
     logging.info("creating encrypted dataset: %s -> %s", args.dataset, key_path)
     zfs.make_encrypted_dataset(args.dataset, key_path, args.options)
 
@@ -61,6 +77,7 @@ def main():
     apps = {
         'list': list_keys,
         'report': report,
+        'backup': backup,
         'zfs_rekey': zfs_rekey,
         'zfs_create': zfs_create,
     }
@@ -74,6 +91,11 @@ def main():
 
     report_parser = subparsers.add_parser('report', help="Generate a printable pdf of the keys")
     report_parser.add_argument('keystore', help="path of a keystore to generate the pdf from")
+
+    backup_parser = subparsers.add_parser('backup', help="Backup one keystore to another")
+    backup_parser.add_argument('keystore', help="path of keystore to backup")
+    backup_parser.add_argument('dest', help="path of keystore to backup to")
+    backup_parser.add_argument('-f', '--force', action='store_true', help="backup even if a key with the same name exists in the destination keystore")
 
     zfs_rekey_parser = subparsers.add_parser('zfs_rekey', help="Generate new keys for datasets in zfs")
     zfs_rekey_parser.add_argument('keystore', help="path of a keystore to store the new keys in, '-' to do a dry run")

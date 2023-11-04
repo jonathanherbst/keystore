@@ -1,7 +1,10 @@
 import binascii
 import hashlib
+import json
 import os
 import secrets
+import shutil
+import time
 
 class Secret:
     @classmethod
@@ -39,49 +42,75 @@ class FSKey:
             return None
         
     @classmethod
-    def create(cls, path: str, secret: Secret):
+    def create(cls, path: str, secret: Secret, extra_params: dict() = None):
         if not os.path.exists(path):
-            return cls.create_unchecked(path, secret)
+            return cls.create_unchecked(path, secret, extra_params)
         else:
             return None
         
     @classmethod
-    def create_unchecked(cls, path: str, secret: Secret):
+    def create_unchecked(cls, path: str, secret: Secret, extra_params: dict() = None):
+        params = extra_params or {}
+        params["sha256_hex"] = secret.sha256_hex
+        params["creation_date"] = time.time()
         key = cls(path)
         open(path, 'wb').write(secret.raw)
-        open(key._sha256_path, 'w').write(secret.sha256_hex)
+        json.dump(params, open(key._params_path, 'w'))
         return key
 
     def __init__(self, path: str):
         self._path = path
+        self._params = None
 
     @property
     def name(self):
         return os.path.basename(self._path)[:-4]
+    
+    @property
+    def params(self) -> dict():
+        if not self._params:
+            try:
+                self._params = json.load(open(self._params_path, 'r'))
+            except:
+                return {}
+        return self._params
+    
+    def set_params(self, params: dict()):
+        self._params = self.params.extend(params)
+        json.dump(self._params, open(self._params_path, 'w'))
 
     @property
     def secret(self):
-        data = open(self._path, 'rb').read()
-        return Secret(data)
+        try:
+            data = open(self._path, 'rb').read()
+            return Secret(data)
+        except FileNotFoundError:
+            return None
     
     @property
     def sha256_hex(self):
-        try:
-            return open(self._sha256_path, 'r').read()
-        except FileNotFoundError:
-            return None
+        return self.params.get("sha256_hex")
         
     @property
     def is_valid(self):
-        return self.secret.sha256_hex == self.sha256_hex
+        secret = self.secret
+        return secret and secret.sha256_hex == self.sha256_hex
+    
+    @property
+    def path(self):
+        return self._path
     
     @property
     def abs_path(self):
         return os.path.abspath(self._path)
+    
+    def copy(self, dest):
+        shutil.copyfile(self._path, dest._path)
+        shutil.copyfile(self._params_path, dest._params_path)
 
     @property
-    def _sha256_path(self):
-        return self._path + ".sha256"
+    def _params_path(self):
+        return self._path + ".params"
 
 class FSKeyStore:
     @classmethod
@@ -117,15 +146,11 @@ class FSKeyStore:
     def get_key_unchecked(self, name: str) -> FSKey:
         return FSKey(self._get_keyfile_path(name))
 
-    def add_key(self, name: str, secret: Secret) -> FSKey:
-        return FSKey.create(self._get_keyfile_path(name), secret)
+    def add_key(self, name: str, secret: Secret, extra_params: dict() = None) -> FSKey:
+        return FSKey.create(self._get_keyfile_path(name), secret, extra_params)
 
-    def set_key(self, name: str, secret: Secret) -> FSKey:
-        return FSKey.create_unchecked(self._get_keyfile_path(name), secret)
-
-    def backup(self, dest):
-        for key in self.valid_keys:
-            dest.set_key(key.name, key.secret)
+    def set_key(self, name: str, secret: Secret, extra_params: dict() = None) -> FSKey:
+        return FSKey.create_unchecked(self._get_keyfile_path(name), secret, extra_params)
         
     def _get_keyfile_path(self, name: str):
         return os.path.join(self._path, name + ".key")
